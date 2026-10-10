@@ -1,0 +1,82 @@
+# Builds Falua for Windows, macOS and Linux on every push, and attaches the plugins to a
+# release when a tag like v0.1.0 is pushed.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+            configure: cmake -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL
+          - name: macos
+            os: macos-latest
+            configure: cmake -B build -G Xcode -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          - name: linux
+            os: ubuntu-latest
+            configure: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux packages
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libx11-dev libxext-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxcomposite-dev libfreetype-dev libfontconfig1-dev
+
+      - name: Configure
+        run: ${{ matrix.configure }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Core test
+        shell: bash
+        run: |
+          mkdir -p build/test-wav
+          exe=$(find build -type f \( -name core_test -o -name core_test.exe \) | head -1)
+          "$exe" build/test-wav
+
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p dist
+          art=$(find build -type d -name Falua_artefacts | head -1)
+          cp -R "$art"/Release/VST3/Falua.vst3 dist/
+          [ -d "$art/Release/AU" ] && cp -R "$art"/Release/AU/Falua.component dist/ || true
+          [ -d "$art/Release/Standalone" ] && cp -R "$art"/Release/Standalone/* dist/ || true
+          cp README.md LICENSE NOTICE.md dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Falua-${{ matrix.name }}
+          path: dist
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Zip
+        run: |
+          cd artifacts
+          for d in */; do (cd "$d" && zip -qr "../${d%/}.zip" .); done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
